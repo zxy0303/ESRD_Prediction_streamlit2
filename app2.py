@@ -24,9 +24,9 @@ def load_models():
     # 加载 9 特征模型 (请确保你有这些文件，且文件名正确)
     try:
         models_9 = {
-            1: joblib.load('./nine_features/catboost_1yr.pkl'),
-            3: joblib.load('./nine_features/catboost_3yr.pkl'),
-            5: joblib.load('./nine_features/catboost_5yr.pkl')
+            1: joblib.load('./nine_features/catboost_op_sm_1yr.pkl'),
+            3: joblib.load('./nine_features/catboost_op_sm_3yr.pkl'),
+            5: joblib.load('./nine_features/catboost_op_sm_5yr.pkl')
         }
     except FileNotFoundError:
         st.warning("⚠️ 未找到9特征模型文件 (gbm_Xyr_9.pkl)，演示模式下暂时使用12特征模型替代。")
@@ -232,6 +232,7 @@ with right_col:
             # 调试辅助：如果报错，打印当前 DataFrame 的列名，方便对比模型需求
 
             st.write("Current Input Columns:", input_data.columns.tolist())
+
 
 
 
