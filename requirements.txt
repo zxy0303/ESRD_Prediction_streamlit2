@@ -1,8 +1,7 @@
+catboost
 scikit-learn
 streamlit
 shap
 pandas
 joblib
 matplotlib
-catboost
-scikit-learn
