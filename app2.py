@@ -5,6 +5,7 @@ import joblib
 import matplotlib.pyplot as plt
 import streamlit.components.v1 as components
 import io
+import numpy as np
 st.set_page_config(page_title="Clinical Decision Support System", layout="wide")
 st.title("🩺 Clinical Decision Support System")
 
@@ -149,75 +150,100 @@ input_data = pd.DataFrame(data_dict)
 # 5. 预测与渲染逻辑 (Prediction Logic)
 # ==========================================
 def render_prediction(model, input_data, year):
+    # [修复1] 创建数据副本！防止修改原始数据影响后续的 3年/5年 预测
+    input_data = input_data.copy()
+    
     # =================================================
     # 1. 提取核心模型 (Handle Pipeline)
     # =================================================
-    # 如果模型是 Pipeline (包含 steps 属性)，我们需要取出最后一步的分类器
-    # 因为 SHAP TreeExplainer 无法直接解释 Pipeline
-    if hasattr(model, 'steps'):
-        # 取出 pipeline 的最后一步，格式通常是 [('step_name', step_object), ...]
-        estimator = model.steps[-1][1]
-    else:
-        estimator = model
+    try:
+        if hasattr(model, 'steps'):
+            # 如果是 Pipeline，取出最后一步的分类器
+            estimator = model.steps[-1][1]
+        else:
+            estimator = model
+    except Exception as e:
+        st.error(f"⚠️ Year {year}: 模型解析失败 - {e}")
+        return
 
     # =================================================
     # 2. 自动对齐特征顺序 (Feature Alignment)
     # =================================================
     try:
-        # 优先从核心模型(estimator)中获取特征名称
-        # CatBoost/XGBoost 使用 feature_names_, Sklearn 使用 feature_names_in_
+        # 获取模型特征名称
         if hasattr(estimator, 'feature_names_'): 
             model_features = estimator.feature_names_
         elif hasattr(estimator, 'feature_names_in_'): 
             model_features = estimator.feature_names_in_
         else:
-            # 如果找不到特征名属性，暂时跳过对齐（可能会在预测时报错）
             model_features = None
 
         if model_features is not None:
-            # 补齐输入数据中缺失的列（如果有的话），填 0
+            model_features = list(model_features) # 确保是列表
+            # 补全缺失列
             missing_cols = set(model_features) - set(input_data.columns)
             if missing_cols:
                 for c in missing_cols:
                     input_data[c] = 0
             
-            # 关键：强制按照模型训练时的特征顺序重排输入数据
+            # 强制重排
             input_data = input_data[model_features]
 
-    except AttributeError:
-        st.warning("⚠️ 无法读取模型特征顺序，正在尝试使用默认顺序。")
-    except KeyError as e:
-        st.error(f"❌ 数据对齐失败，缺少特征: {e}")
+    except Exception as e:
+        st.warning(f"Feature alignment warning: {e}")
+
+    # =================================================
+    # 3. 预测 (Prediction)
+    # =================================================
+    try:
+        # 必须使用完整 model (包含Pipeline) 进行预测
+        if hasattr(model, "predict_proba"):
+            esrd_prob = model.predict_proba(input_data)[0][1]
+            st.write(f"Probability of kidney failure within {year} year: **{esrd_prob:.2%}**")
+        else:
+            st.warning(f"⚠️ Year {year}: 模型不支持 predict_proba")
+            return
+
+    except Exception as e:
+        st.error(f"❌ Year {year} 预测出错: {str(e)}")
+        # 调试信息：展开查看列名
+        with st.expander(f"Debug Info (Year {year})"):
+            st.write("Input Columns:", input_data.columns.tolist())
         return
 
     # =================================================
-    # 3. 预测与 SHAP 解释
+    # 4. SHAP 解释 (仅针对树模型)
     # =================================================
     try:
-        # 1. 预测概率：必须使用完整的 model (Pipeline)，以保证预处理步骤（如存在）被执行
-        esrd = model.predict_proba(input_data)[0][1]
-        
-        st.write(f"Probability of kidney failure within {year} year: **{esrd:.2%}**")
-
-        # 2. SHAP 解释：必须使用核心模型 (estimator)，因为 TreeExplainer 只认树模型
+        # SHAP 解释器必须用核心模型 (estimator)
         explainer = shap.TreeExplainer(estimator)
-        
-        # 计算 SHAP 值
         shap_values = explainer.shap_values(input_data)
 
-        # 3. 绘图
+        # [修复2] 兼容不同的 SHAP 返回格式 (List vs Array)
+        # Random Forest 通常返回 list [class0, class1]，我们需要 class1
+        if isinstance(shap_values, list):
+            # 对应的 expected_value 通常也是 list
+            base_value = explainer.expected_value[1]
+            shap_values_to_plot = shap_values[1]
+        else:
+            # XGBoost/CatBoost 通常直接返回 array
+            base_value = explainer.expected_value
+            shap_values_to_plot = shap_values
+
+        # 绘图
         force_plot = shap.force_plot(
-            explainer.expected_value,
-            shap_values[0] if isinstance(shap_values, list) else shap_values, # 兼容不同版本返回值
+            base_value,
+            shap_values_to_plot,
             input_data,
             matplotlib=False,
+            link="logit" # 可选：如果是概率输出，有时需要 logit link，视模型而定
         )
 
         html_buffer = io.StringIO()
         shap.save_html(html_buffer, force_plot)
         html_content = html_buffer.getvalue()
 
-        component_height = 140
+        # 渲染
         wrapped = f"""
         <div style='width: 100%; overflow-x: auto; overflow-y: hidden;'>
             <style>
@@ -227,14 +253,13 @@ def render_prediction(model, input_data, year):
             {html_content}
         </div>
         """
-        components.html(wrapped, height=component_height, scrolling=True)
+        components.html(wrapped, height=150, scrolling=True)
 
-    except Exception as e:
-        st.error(f"Error in processing: {e}")
-        # 调试信息：如果报错，显示当前处理的模型类型和列名，方便排查
-        st.write(f"Debug Info - Model Type: {type(model)}")
-        st.write(f"Debug Info - Estimator Type: {type(estimator)}")
-        st.write("Debug Info - Input Columns:", input_data.columns.tolist())
+    except Exception:
+        # 如果是 SVM/KNN 等不支持 SHAP 的模型，或者绘图失败
+        # 我们捕获异常但不报错，避免影响概率值的显示
+        st.caption(f"ℹ️ (SHAP plot not available for {type(estimator).__name__})")
+
 
 
 
