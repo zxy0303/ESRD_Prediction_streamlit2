@@ -5,6 +5,7 @@ import joblib
 import matplotlib.pyplot as plt
 import streamlit.components.v1 as components
 import io
+import numpy as np
 st.set_page_config(page_title="Clinical Decision Support System", layout="wide")
 st.title("🩺 Clinical Decision Support System")
 
@@ -150,71 +151,114 @@ input_data = pd.DataFrame(data_dict)
 # ==========================================
 def render_prediction(model, input_data, year):
     # =================================================
-    # 1. 自动对齐特征顺序 (防止报错)
+    # 修复 1: 自动对齐特征顺序 (兼容 sklearn 和 pipeline)
     # =================================================
-    try:
+    model_features = None
+    
+    # 1. 尝试直接获取 (针对 CatBoost/XGBoost)
+    if hasattr(model, 'feature_names_'):
         model_features = model.feature_names_
-        missing_cols = set(model_features) - set(input_data.columns)
-        if missing_cols:
-            for c in missing_cols:
-                input_data[c] = 0
-        input_data = input_data[model_features]
-    except AttributeError:
-        st.warning("⚠️ 无法读取模型特征顺序，请确保输入数据的列顺序正确。")
-    except KeyError as e:
-        st.error(f"❌ 数据对齐失败，缺少特征: {e}")
-        return
+    # 2. 尝试获取 sklearn 标准属性 (针对 RandomForest)
+    elif hasattr(model, 'feature_names_in_'):
+        model_features = model.feature_names_in_
+    # 3. 如果是 Pipeline，尝试从最后一步模型获取
+    elif hasattr(model, 'steps'):
+        try:
+            # steps 通常是列表 [('step_name', step_obj), ...]，取最后一个对象的属性
+            final_estimator = model.steps[-1][1]
+            if hasattr(final_estimator, 'feature_names_'):
+                model_features = final_estimator.feature_names_
+            elif hasattr(final_estimator, 'feature_names_in_'):
+                model_features = final_estimator.feature_names_in_
+        except Exception:
+            pass
+
+    if model_features is not None:
+        try:
+            # 补齐缺失列 (设为0)
+            missing_cols = set(model_features) - set(input_data.columns)
+            if missing_cols:
+                for c in missing_cols:
+                    input_data[c] = 0
+            
+            # 核心修复: 强制按照模型记录的特征顺序重排 input_data
+            input_data = input_data[model_features]
+        except KeyError as e:
+            st.error(f"❌ 数据对齐失败，缺少特征: {e}")
+            return
+    else:
+        st.warning("⚠️ 无法读取模型特征顺序，将使用默认输入顺序。如果报错，请检查输入特征名称是否与训练时一致。")
 
     # =================================================
     # 2. 预测与生成 SHAP 值
     # =================================================
-    esrd = model.predict_proba(input_data)[0][1]
-    explainer = shap.TreeExplainer(model)
-    shap_values = explainer.shap_values(input_data)
+    # 预测使用原始 model (如果是 Pipeline，需要它来处理可能的前置步骤)
+    try:
+        esrd = model.predict_proba(input_data)[0][1]
+    except Exception as e:
+        st.error(f"预测发生错误: {e}")
+        return
+
+    # 修复 2: 针对 Pipeline 提取内部模型给 SHAP
+    shap_model = model
+    if hasattr(model, 'steps'):
+        # 提取 Pipeline 的最后一步（通常是分类器）
+        shap_model = model.steps[-1][1]
+
+    try:
+        # 创建 Explainer
+        explainer = shap.TreeExplainer(shap_model)
+        # 计算 SHAP 值
+        shap_values = explainer.shap_values(input_data)
+    except Exception as e:
+        st.warning(f"无法生成 SHAP 图 (可能是模型类型不兼容): {e}")
+        st.write(f"Probability of kidney failure within {year} year: **{esrd:.2%}**")
+        return
 
     st.write(f"Probability of kidney failure within {year} year: **{esrd:.2%}**")
 
     # =================================================
-    # 3. 绘图与显示优化 (关键修改部分)
+    # 3. 绘图与显示优化
     # =================================================
-    # 生成 SHAP JS 图
-    force_plot = shap.force_plot(
-        explainer.expected_value,
-        shap_values[0],
-        input_data,
-        matplotlib=False,
-        # 尝试让 SHAP 自身不强制超大宽度，但在 HTML 中我们主要靠 CSS 控制
-    )
+    try:
+        # 针对二分类模型，shap_values 可能是 list (对应类0和类1)，通常取 shap_values[1] 或 shap_values
+        # TreeExplainer 对不同模型返回格式不同，这里做一个简单的兼容性处理
+        shap_val_to_plot = shap_values
+        if isinstance(shap_values, list) and len(shap_values) == 2:
+             # 如果是 list，通常 index 1 是正类 (Yes)
+            shap_val_to_plot = shap_values[1]
+        
+        # 某些版本的 shap + sklearn RF，expected_value 也是 list
+        base_value = explainer.expected_value
+        if isinstance(base_value, list) or isinstance(base_value, np.ndarray):
+            if len(base_value) == 2:
+                base_value = base_value[1]
 
-    # 保存为 HTML
-    html_buffer = io.StringIO()
-    shap.save_html(html_buffer, force_plot)
-    html_content = html_buffer.getvalue()
+        force_plot = shap.force_plot(
+            base_value,
+            shap_val_to_plot, # 使用处理后的 SHAP 值
+            input_data,
+            matplotlib=False
+        )
 
-    # -------------------------------------------------------
-    # 调整 1: 增加高度 (Height)
-    # 原来的 140 太小，容易切掉下方的特征名，改为 300 或更高
-    # -------------------------------------------------------
-    component_height = 140
+        html_buffer = io.StringIO()
+        shap.save_html(html_buffer, force_plot)
+        html_content = html_buffer.getvalue()
 
-    # -------------------------------------------------------
-    # 调整 2: CSS 样式优化
-    # - width: 100% !important; 强制图表适应容器宽度
-    # - overflow-x: auto; 如果实在太挤，允许横向滚动
-    # -------------------------------------------------------
-    wrapped = f"""
-    <div style='width: 100%; overflow-x: auto; overflow-y: hidden;'>
-        <style>
-            /* 尝试强制覆盖 SHAP 内部生成的宽度样式 */
-            .shap-force-plot {{ width: 100% !important; }}
-            .js-plotly-plot {{ width: 100% !important; }}
-        </style>
-        {html_content}
-    </div>
-    """
-
-    # 渲染组件：开启 scrolling=True 作为双重保险
-    components.html(wrapped, height=component_height, scrolling=True)
+        component_height = 140
+        wrapped = f"""
+        <div style='width: 100%; overflow-x: auto; overflow-y: hidden;'>
+            <style>
+                .shap-force-plot {{ width: 100% !important; }}
+                .js-plotly-plot {{ width: 100% !important; }}
+            </style>
+            {html_content}
+        </div>
+        """
+        components.html(wrapped, height=component_height, scrolling=True)
+    
+    except Exception as e:
+        st.error(f"SHAP 图表渲染出错: {e}")
 
 
 with right_col:
@@ -232,3 +276,4 @@ with right_col:
             # 调试辅助：如果报错，打印当前 DataFrame 的列名，方便对比模型需求
 
             st.write("Current Input Columns:", input_data.columns.tolist())
+
