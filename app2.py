@@ -155,20 +155,17 @@ def render_prediction(model, input_data, year):
     # 1. 自动对齐特征顺序
     # =================================================
     model_features = None
-    if hasattr(model, 'feature_names_'):
-        model_features = model.feature_names_
-    elif hasattr(model, 'feature_names_in_'):
-        model_features = model.feature_names_in_
+    # 尝试获取特征名
+    if hasattr(model, 'feature_names_'): model_features = model.feature_names_
+    elif hasattr(model, 'feature_names_in_'): model_features = model.feature_names_in_
     elif hasattr(model, 'steps'): # Pipeline
         try:
             final_estimator = model.steps[-1][1]
-            if hasattr(final_estimator, 'feature_names_'):
-                model_features = final_estimator.feature_names_
-            elif hasattr(final_estimator, 'feature_names_in_'):
-                model_features = final_estimator.feature_names_in_
-        except:
-            pass
+            if hasattr(final_estimator, 'feature_names_'): model_features = final_estimator.feature_names_
+            elif hasattr(final_estimator, 'feature_names_in_'): model_features = final_estimator.feature_names_in_
+        except: pass
 
+    # 对齐数据列
     if model_features is not None:
         try:
             missing_cols = set(model_features) - set(input_data.columns)
@@ -192,10 +189,8 @@ def render_prediction(model, input_data, year):
     # =================================================
     # 3. 计算 SHAP 值
     # =================================================
-    # 提取 Pipeline 内部模型
     shap_model = model
-    if hasattr(model, 'steps'):
-        shap_model = model.steps[-1][1]
+    if hasattr(model, 'steps'): shap_model = model.steps[-1][1]
 
     try:
         explainer = shap.TreeExplainer(shap_model)
@@ -206,53 +201,78 @@ def render_prediction(model, input_data, year):
         return
 
     # =================================================
-    # 4. 数据清洗与解耦 (彻底解决 Ambiguous 错误)
+    # 4. 数据清洗与强力对齐 (Fix: SHAP=1, Features=12)
     # =================================================
     try:
-        # --- A. 处理 Base Value (基准值) ---
-        # 目标：提取出一个纯 float 标量
-        base_val = base_value_raw
-        # 如果是数组/列表 (针对 RF 的 [class0, class1])
-        if isinstance(base_val, (list, np.ndarray)):
-            base_val = np.array(base_val).flatten()
-            if base_val.shape[0] > 1:
-                base_val = base_val[-1] # 取正类 (Class 1)
-            else:
-                base_val = base_val[0]
-        # 强制转 float
-        final_base_value = float(base_val)
-
-        # --- B. 处理 SHAP Values ---
-        # 目标：提取出一个形状为 (N_features,) 的一维数组
-        shap_val = shap_values_raw
-        if isinstance(shap_val, list): # RF 返回 [array, array]
-            shap_val = shap_val[1] # 取正类
-        
-        shap_val = np.array(shap_val)
-        # 如果形状是 (1, N)，拍扁成 (N,)
-        if shap_val.ndim == 2 and shap_val.shape[0] == 1:
-            shap_val = shap_val.flatten()
-        
-        final_shap_values = shap_val
-
-        # --- C. 处理特征数据 (关键步骤：拆解 DataFrame) ---
-        # 不要直接传 DataFrame，拆成“数值数组”和“名称列表”
+        # --- A. 准备特征数据 ---
+        # 强制转为纯净的一维数组
         final_feature_values = input_data.iloc[0].values.flatten().astype(float)
         final_feature_names = input_data.columns.tolist()
+        n_features = len(final_feature_names) # 应该是 12 或 9
 
-        # 安全检查：确保维度一致
+        # --- B. 处理 SHAP Values ---
+        shap_val = shap_values_raw
+        
+        # 1. 如果是列表 (RF通常返回 [class0, class1])，取第二个
+        if isinstance(shap_val, list):
+            # 防御性检查：列表不为空
+            if len(shap_val) > 1:
+                shap_val = shap_val[1]
+            elif len(shap_val) == 1:
+                shap_val = shap_val[0]
+        
+        # 2. 转为 Numpy 数组并移除所有为1的维度 (squeeze)
+        # 例如 (1, 12, 1) -> (12,)
+        shap_val = np.array(shap_val)
+        shap_val = np.squeeze(shap_val)
+        
+        # 3. 基于元素总数进行最终修正
+        if shap_val.size == n_features:
+            # 完美情况：元素数量等于特征数 (12 == 12)
+            # 无论形状如何，直接拉平
+            shap_val = shap_val.flatten()
+            
+        elif shap_val.size == 2 * n_features:
+            # 双倍情况：可能混合了两个类别 (24 elements)
+            # 尝试拉平后取后半部分
+            st.warning("⚠️ 检测到双类别混合数据，尝试自动提取正类。")
+            flat = shap_val.flatten()
+            shap_val = flat[n_features:] # 取后12个
+            
+        else:
+            # 异常情况：打印详细调试信息
+            st.error(f"⚠️ SHAP 形状严重不匹配!")
+            st.write(f"Expected Features: {n_features}")
+            st.write(f"SHAP Raw Type: {type(shap_values_raw)}")
+            st.write(f"SHAP Processed Shape: {shap_val.shape}")
+            st.write(f"SHAP Total Elements: {shap_val.size}")
+            return # 退出绘图
+
+        final_shap_values = shap_val
+
+        # --- C. 处理 Base Value ---
+        base_val = base_value_raw
+        if isinstance(base_val, (list, np.ndarray)):
+            base_val = np.array(base_val).flatten()
+            if base_val.size > 1:
+                base_val = base_val[-1] # 取最后一个
+            elif base_val.size == 1:
+                base_val = base_val[0]
+        final_base_value = float(base_val)
+
+        # --- D. 最终维度检查 ---
         if len(final_shap_values) != len(final_feature_values):
-            st.warning(f"⚠️ SHAP 维度不匹配: SHAP={len(final_shap_values)}, Features={len(final_feature_values)}")
+            st.warning(f"⚠️ 维度校验失败: SHAP={len(final_shap_values)}, Features={len(final_feature_values)}")
             return
 
         # =================================================
         # 5. 绘图
         # =================================================
         force_plot = shap.force_plot(
-            final_base_value,       # 纯 float
-            final_shap_values,      # 纯 1D numpy array
-            features=final_feature_values, # 纯 1D numpy array (数值)
-            feature_names=final_feature_names, # 纯 list (名称)
+            final_base_value,
+            final_shap_values,
+            features=final_feature_values,
+            feature_names=final_feature_names,
             matplotlib=False
         )
 
@@ -272,7 +292,7 @@ def render_prediction(model, input_data, year):
         components.html(wrapped, height=140, scrolling=True)
     
     except Exception as e:
-        st.warning(f"⚠️ SHAP 图表渲染跳过 (代码内部错误): {e}")
+        st.error(f"⚠️ 绘图渲染逻辑内部错误: {e}")
 
 
 with right_col:
@@ -290,6 +310,7 @@ with right_col:
             # 调试辅助：如果报错，打印当前 DataFrame 的列名，方便对比模型需求
 
             st.write("Current Input Columns:", input_data.columns.tolist())
+
 
 
 
