@@ -151,12 +151,22 @@ input_data = pd.DataFrame(data_dict)
 # ==========================================
 
 def render_prediction(model, input_data, year):
+    # --- 辅助函数：强制转换为单个标量 ---
+    def safe_scalar(val):
+        try:
+            # 如果是 numpy 数组或列表
+            val = np.array(val)
+            if val.size == 1:
+                return val.item()
+            # 如果包含多个值（如 [0.2, 0.8]），取最后一个（通常是正类概率）
+            return val.flatten()[-1].item()
+        except:
+            return 0.0 # 兜底
+
     # =================================================
-    # 1. 自动对齐特征顺序 (兼容 sklearn 和 pipeline)
+    # 1. 自动对齐特征顺序
     # =================================================
     model_features = None
-    
-    # 尝试获取特征名称
     if hasattr(model, 'feature_names_'):
         model_features = model.feature_names_
     elif hasattr(model, 'feature_names_in_'):
@@ -168,20 +178,17 @@ def render_prediction(model, input_data, year):
                 model_features = final_estimator.feature_names_
             elif hasattr(final_estimator, 'feature_names_in_'):
                 model_features = final_estimator.feature_names_in_
-        except Exception:
+        except:
             pass
 
     if model_features is not None:
         try:
-            # 补齐缺失列
             missing_cols = set(model_features) - set(input_data.columns)
             if missing_cols:
-                for c in missing_cols:
-                    input_data[c] = 0
-            # 强制重排
+                for c in missing_cols: input_data[c] = 0
             input_data = input_data[model_features]
         except KeyError as e:
-            st.error(f"❌ 数据对齐失败: {e}")
+            st.error(f"❌ 特征对齐失败: {e}")
             return
 
     # =================================================
@@ -209,45 +216,31 @@ def render_prediction(model, input_data, year):
     st.write(f"Probability of kidney failure within {year} year: **{esrd:.2%}**")
 
     # =================================================
-    # 3. 数据格式清洗 (关键修复：解决 ambiguous array 报错)
+    # 3. 彻底的数据清洗 (修复 Ambiguous Truth Value 错误)
     # =================================================
     try:
         # --- A. 清洗 shap_values ---
-        shap_val_to_plot = shap_values
-        
-        # 如果是列表 (通常是二分类 [class0, class1])，取 class1
+        # Random Forest 通常返回 list [array_class0, array_class1]
+        shap_val_clean = shap_values
         if isinstance(shap_values, list):
-            if len(shap_values) >= 2:
-                shap_val_to_plot = shap_values[1]
-            else:
-                shap_val_to_plot = shap_values[0]
+            shap_val_clean = shap_values[1] # 取正类 (Yes)
         
-        # --- B. 清洗 base_value (expected_value) ---
-        base_value = explainer.expected_value
-        
-        # 统一转为 numpy array 以便处理
-        if not isinstance(base_value, np.ndarray):
-            base_value = np.array(base_value)
-            
-        # 如果是多维数组或列表，尝试提取目标类别的标量
-        # 常见情况: array([0.1, 0.9]) -> 取 0.9
-        if base_value.size > 1:
-            if base_value.ndim >= 1 and len(base_value) >= 2:
-                 # 假设二分类，取第二个值
-                base_value = base_value[1]
-            else:
-                # 异常情况：如果是 (1, 2) 这种形状，先 flatten
-                base_value = base_value.flatten()[-1] # 取最后一个
-        
-        # 最终确保是标量 (float)
-        if hasattr(base_value, 'item'):
-            base_value = base_value.item()
+        # 强制转换为 numpy 数组
+        shap_val_clean = np.array(shap_val_clean)
+
+        # 【核心修复】如果形状是 (1, 12)，强制 flatten 成 (12,)
+        # 这样 SHAP 就不会把它误判为“多样本”从而触发布尔歧义
+        if shap_val_clean.ndim == 2 and shap_val_clean.shape[0] == 1:
+            shap_val_clean = shap_val_clean.flatten()
+
+        # --- B. 清洗 base_value ---
+        base_value_clean = safe_scalar(explainer.expected_value)
 
         # --- C. 绘图 ---
         force_plot = shap.force_plot(
-            base_value,
-            shap_val_to_plot,
-            input_data,
+            base_value_clean,    # 必须是标量 float
+            shap_val_clean,      # 必须是 (N_features,) 的一维数组
+            input_data.iloc[0,:], # 确保输入特征也是 Series (一维)
             matplotlib=False
         )
 
@@ -255,7 +248,6 @@ def render_prediction(model, input_data, year):
         shap.save_html(html_buffer, force_plot)
         html_content = html_buffer.getvalue()
 
-        component_height = 140
         wrapped = f"""
         <div style='width: 100%; overflow-x: auto; overflow-y: hidden;'>
             <style>
@@ -265,11 +257,11 @@ def render_prediction(model, input_data, year):
             {html_content}
         </div>
         """
-        components.html(wrapped, height=component_height, scrolling=True)
+        components.html(wrapped, height=140, scrolling=True)
     
     except Exception as e:
-        # 仅显示预测结果，不让图表报错卡死整个应用
-        st.warning(f"⚠️ SHAP 图表渲染跳过 (数据格式不兼容): {e}")
+        # 如果还是报错，打印出来但不要让程序崩溃
+        st.warning(f"⚠️ SHAP 图表渲染跳过: {e}")
 
 
 with right_col:
@@ -287,6 +279,7 @@ with right_col:
             # 调试辅助：如果报错，打印当前 DataFrame 的列名，方便对比模型需求
 
             st.write("Current Input Columns:", input_data.columns.tolist())
+
 
 
 
