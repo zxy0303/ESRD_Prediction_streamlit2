@@ -151,18 +151,6 @@ input_data = pd.DataFrame(data_dict)
 # ==========================================
 
 def render_prediction(model, input_data, year):
-    # --- 辅助函数：强制转换为单个标量 ---
-    def safe_scalar(val):
-        try:
-            # 如果是 numpy 数组或列表
-            val = np.array(val)
-            if val.size == 1:
-                return val.item()
-            # 如果包含多个值（如 [0.2, 0.8]），取最后一个（通常是正类概率）
-            return val.flatten()[-1].item()
-        except:
-            return 0.0 # 兜底
-
     # =================================================
     # 1. 自动对齐特征顺序
     # =================================================
@@ -192,55 +180,79 @@ def render_prediction(model, input_data, year):
             return
 
     # =================================================
-    # 2. 预测与生成 SHAP 值
+    # 2. 预测概率
     # =================================================
     try:
         esrd = model.predict_proba(input_data)[0][1]
+        st.write(f"Probability of kidney failure within {year} year: **{esrd:.2%}**")
     except Exception as e:
         st.error(f"预测发生错误: {e}")
         return
 
-    # 提取 Pipeline 内部模型 (修复 9 特征报错)
+    # =================================================
+    # 3. 计算 SHAP 值
+    # =================================================
+    # 提取 Pipeline 内部模型
     shap_model = model
     if hasattr(model, 'steps'):
         shap_model = model.steps[-1][1]
 
     try:
         explainer = shap.TreeExplainer(shap_model)
-        shap_values = explainer.shap_values(input_data)
+        shap_values_raw = explainer.shap_values(input_data)
+        base_value_raw = explainer.expected_value
     except Exception as e:
-        st.warning(f"无法生成 SHAP 图: {e}")
-        st.write(f"Probability of kidney failure within {year} year: **{esrd:.2%}**")
+        st.warning(f"无法生成 SHAP 数据: {e}")
         return
 
-    st.write(f"Probability of kidney failure within {year} year: **{esrd:.2%}**")
-
     # =================================================
-    # 3. 彻底的数据清洗 (修复 Ambiguous Truth Value 错误)
+    # 4. 数据清洗与解耦 (彻底解决 Ambiguous 错误)
     # =================================================
     try:
-        # --- A. 清洗 shap_values ---
-        # Random Forest 通常返回 list [array_class0, array_class1]
-        shap_val_clean = shap_values
-        if isinstance(shap_values, list):
-            shap_val_clean = shap_values[1] # 取正类 (Yes)
+        # --- A. 处理 Base Value (基准值) ---
+        # 目标：提取出一个纯 float 标量
+        base_val = base_value_raw
+        # 如果是数组/列表 (针对 RF 的 [class0, class1])
+        if isinstance(base_val, (list, np.ndarray)):
+            base_val = np.array(base_val).flatten()
+            if base_val.shape[0] > 1:
+                base_val = base_val[-1] # 取正类 (Class 1)
+            else:
+                base_val = base_val[0]
+        # 强制转 float
+        final_base_value = float(base_val)
+
+        # --- B. 处理 SHAP Values ---
+        # 目标：提取出一个形状为 (N_features,) 的一维数组
+        shap_val = shap_values_raw
+        if isinstance(shap_val, list): # RF 返回 [array, array]
+            shap_val = shap_val[1] # 取正类
         
-        # 强制转换为 numpy 数组
-        shap_val_clean = np.array(shap_val_clean)
+        shap_val = np.array(shap_val)
+        # 如果形状是 (1, N)，拍扁成 (N,)
+        if shap_val.ndim == 2 and shap_val.shape[0] == 1:
+            shap_val = shap_val.flatten()
+        
+        final_shap_values = shap_val
 
-        # 【核心修复】如果形状是 (1, 12)，强制 flatten 成 (12,)
-        # 这样 SHAP 就不会把它误判为“多样本”从而触发布尔歧义
-        if shap_val_clean.ndim == 2 and shap_val_clean.shape[0] == 1:
-            shap_val_clean = shap_val_clean.flatten()
+        # --- C. 处理特征数据 (关键步骤：拆解 DataFrame) ---
+        # 不要直接传 DataFrame，拆成“数值数组”和“名称列表”
+        final_feature_values = input_data.iloc[0].values.flatten().astype(float)
+        final_feature_names = input_data.columns.tolist()
 
-        # --- B. 清洗 base_value ---
-        base_value_clean = safe_scalar(explainer.expected_value)
+        # 安全检查：确保维度一致
+        if len(final_shap_values) != len(final_feature_values):
+            st.warning(f"⚠️ SHAP 维度不匹配: SHAP={len(final_shap_values)}, Features={len(final_feature_values)}")
+            return
 
-        # --- C. 绘图 ---
+        # =================================================
+        # 5. 绘图
+        # =================================================
         force_plot = shap.force_plot(
-            base_value_clean,    # 必须是标量 float
-            shap_val_clean,      # 必须是 (N_features,) 的一维数组
-            input_data.iloc[0,:], # 确保输入特征也是 Series (一维)
+            final_base_value,       # 纯 float
+            final_shap_values,      # 纯 1D numpy array
+            features=final_feature_values, # 纯 1D numpy array (数值)
+            feature_names=final_feature_names, # 纯 list (名称)
             matplotlib=False
         )
 
@@ -260,8 +272,7 @@ def render_prediction(model, input_data, year):
         components.html(wrapped, height=140, scrolling=True)
     
     except Exception as e:
-        # 如果还是报错，打印出来但不要让程序崩溃
-        st.warning(f"⚠️ SHAP 图表渲染跳过: {e}")
+        st.warning(f"⚠️ SHAP 图表渲染跳过 (代码内部错误): {e}")
 
 
 with right_col:
@@ -279,6 +290,7 @@ with right_col:
             # 调试辅助：如果报错，打印当前 DataFrame 的列名，方便对比模型需求
 
             st.write("Current Input Columns:", input_data.columns.tolist())
+
 
 
 
