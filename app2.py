@@ -5,10 +5,10 @@ import joblib
 import matplotlib.pyplot as plt
 import streamlit.components.v1 as components
 import io
-import numpy as np
+import numpy as np # 必须导入 numpy
+
 st.set_page_config(page_title="Clinical Decision Support System", layout="wide")
 st.title("🩺 Clinical Decision Support System")
-
 
 # ==========================================
 # 1. 模型加载 (Model Loading)
@@ -22,7 +22,7 @@ def load_models():
         5: joblib.load('./selected_features/rf_5yr.pkl')
     }
 
-    # 加载 9 特征模型 (请确保你有这些文件，且文件名正确)
+    # 加载 9 特征模型
     try:
         models_9 = {
             1: joblib.load('./nine_features/catboost_op_sm_1yr.pkl'),
@@ -30,14 +30,12 @@ def load_models():
             5: joblib.load('./nine_features/catboost_op_sm_5yr.pkl')
         }
     except FileNotFoundError:
-        st.warning("⚠️ 未找到9特征模型文件 (gbm_Xyr_9.pkl)，演示模式下暂时使用12特征模型替代。")
+        st.warning("⚠️ 未找到9特征模型文件，演示模式下暂时使用12特征模型替代。")
         models_9 = models_12
 
     return models_12, models_9
 
-
 models_12, models_9 = load_models()
-
 
 # ==========================================
 # 2. 模式选择 (Mode Selection)
@@ -48,14 +46,11 @@ model_mode = st.radio(
     ("12 Features (Full)", "9 Features (Reduced)"),
     horizontal=True
 )
-
 is_full_mode = (model_mode == "12 Features (Full)")
 
-st.markdown(
-    f"Current Mode: **{model_mode}**. "
-    f"{'Includes all clinical features.' if is_full_mode else 'Excludes PAX2, Family History, and Prenatal Phenotype.'}"
-)
-
+# ==========================================
+# 3. 动态输入界面 (Dynamic UI)
+# ==========================================
 left_col, right_col = st.columns([2, 3], gap="large")
 
 cakut_subphenotype_list = {
@@ -68,52 +63,36 @@ cakut_subphenotype_list = {
     'others': 7
 }
 
-# ==========================================
-# 3. 动态输入界面 (Dynamic UI)
-# ==========================================
 with left_col:
     st.subheader("🏥 Patient Characteristics")
     col1, col2 = st.columns(2, gap='medium')
 
-    # --- 第一列输入 ---
     with col1:
-        # [保留] 核心特征
         age_first_diagnose = st.number_input("Age At First Diagnose(yr)", min_value=0.0, max_value=18.0, value=0.0)
         gender = st.selectbox("Gender", ["Female", "Male"])
-
-        # [移除] 仅在 12 特征模式下显示
         if is_full_mode:
             family_history = st.selectbox("Family history", ["No", "Yes"])
         else:
-            family_history = "No"  # 默认填充，不参与9特征预测
-
-        # [保留] 核心特征
+            family_history = "No"
         ckd_stage_first_diagnose = st.selectbox("CKD Stage At First Diagnose", [1, 2, 3, 4, 5])
-        short_stature = st.selectbox("Short Stature", ["No", "Yes"])  # 这次保留了
+        short_stature = st.selectbox("Short Stature", ["No", "Yes"])
         cakut_subphenotype = st.selectbox("CAKUT Subphenotype", cakut_subphenotype_list.keys())
 
-    # --- 第二列输入 ---
     with col2:
-        # [移除] 仅在 12 特征模式下显示
         if is_full_mode:
             pax2 = st.selectbox("PAX2", ["No", "Yes"])
         else:
             pax2 = "No"
-
-        # [移除] 仅在 12 特征模式下显示
         if is_full_mode:
             prenatal_phenotype = st.selectbox("Prenatal Phenotype", ["No", "Yes"])
         else:
             prenatal_phenotype = "No"
-
-        # [保留] 核心特征
         congenital_heart_disease = st.selectbox("Congenital Heart Disease", ["No", "Yes"])
-        ocular = st.selectbox("Ocular", ["No", "Yes"])  # 这次保留了
+        ocular = st.selectbox("Ocular", ["No", "Yes"])
         preterm_birth = st.selectbox("Preterm Birth", ["No", "Yes"])
         behavioral_cognitive_abnormalities = st.selectbox("Behavioral Cognitive Abnormalities", ["No", "Yes"])
 
     predict_btn = st.button("PREDICT")
-
 
 # ==========================================
 # 4. 数据构建 (Data Construction)
@@ -121,8 +100,6 @@ with left_col:
 def get_binary(val):
     return 0 if val == 'No' or val == 'Female' else 1
 
-
-# 1. 首先构建 9 个核心特征 (这是你指定的列表)
 data_dict = {
     "gender (1/0)": [get_binary(gender)],
     "preterm_birth (1/0)": [get_binary(preterm_birth)],
@@ -135,7 +112,6 @@ data_dict = {
     "short_stature (1/0)": [get_binary(short_stature)]
 }
 
-# 2. 如果是 12 特征模式，追加另外 3 个
 if is_full_mode:
     data_dict.update({
         'PAX2': [get_binary(pax2)],
@@ -145,123 +121,87 @@ if is_full_mode:
 
 input_data = pd.DataFrame(data_dict)
 
-
 # ==========================================
-# 5. 预测与渲染逻辑 (Prediction Logic)
+# 5. 预测与渲染逻辑 (Core Logic)
 # ==========================================
 def render_prediction(model, input_data, year):
-    # [修复1] 创建数据副本！防止修改原始数据影响后续的 3年/5年 预测
+    # 【必须步骤 1】使用副本，防止影响其他年份的预测
     input_data = input_data.copy()
-    
-    # =================================================
-    # 1. 提取核心模型 (Handle Pipeline)
-    # =================================================
-    try:
-        if hasattr(model, 'steps'):
-            # 如果是 Pipeline，取出最后一步的分类器
-            estimator = model.steps[-1][1]
-        else:
-            estimator = model
-    except Exception as e:
-        st.error(f"⚠️ Year {year}: 模型解析失败 - {e}")
-        return
 
-    # =================================================
-    # 2. 自动对齐特征顺序 (Feature Alignment)
-    # =================================================
-    try:
-        # 获取模型特征名称
-        if hasattr(estimator, 'feature_names_'): 
-            model_features = estimator.feature_names_
-        elif hasattr(estimator, 'feature_names_in_'): 
-            model_features = estimator.feature_names_in_
-        else:
-            model_features = None
+    # 【必须步骤 2】识别核心模型 (解决 Pipeline 报错问题)
+    if hasattr(model, 'steps'):
+        estimator = model.steps[-1][1] # Pipeline 取最后一步
+    else:
+        estimator = model # 普通模型
 
-        if model_features is not None:
-            model_features = list(model_features) # 确保是列表
-            # 补全缺失列
-            missing_cols = set(model_features) - set(input_data.columns)
-            if missing_cols:
-                for c in missing_cols:
-                    input_data[c] = 0
+    # 【必须步骤 3】自动修正特征顺序 (解决 Feature names mismatch 问题)
+    # 我们不手动去猜顺序，直接问模型“你想要什么顺序？”然后照做
+    try:
+        # 获取模型期待的特征
+        if hasattr(estimator, 'feature_names_in_'):
+            expected_features = estimator.feature_names_in_
+        elif hasattr(estimator, 'feature_names_'):
+            expected_features = estimator.feature_names_
+        else:
+            expected_features = None
+        
+        # 如果模型有明确的特征顺序要求，我们就强制对齐
+        if expected_features is not None:
+            # 防止列缺失报错，如果缺了就补0
+            for col in expected_features:
+                if col not in input_data.columns:
+                    input_data[col] = 0
+            # 关键：按模型要求的顺序重新排列
+            input_data = input_data[list(expected_features)]
             
-            # 强制重排
-            input_data = input_data[model_features]
-
     except Exception as e:
-        st.warning(f"Feature alignment warning: {e}")
+        print(f"Warning in alignment: {e}")
 
-    # =================================================
-    # 3. 预测 (Prediction)
-    # =================================================
+    # --- 预测 ---
     try:
-        # 必须使用完整 model (包含Pipeline) 进行预测
-        if hasattr(model, "predict_proba"):
-            esrd_prob = model.predict_proba(input_data)[0][1]
-            st.write(f"Probability of kidney failure within {year} year: **{esrd_prob:.2%}**")
-        else:
-            st.warning(f"⚠️ Year {year}: 模型不支持 predict_proba")
-            return
-
+        esrd_prob = model.predict_proba(input_data)[0][1]
+        st.write(f"Probability of kidney failure within {year} year: **{esrd_prob:.2%}**")
     except Exception as e:
-        st.error(f"❌ Year {year} 预测出错: {str(e)}")
-        # 调试信息：展开查看列名
-        with st.expander(f"Debug Info (Year {year})"):
-            st.write("Input Columns:", input_data.columns.tolist())
+        st.error(f"Prediction Error ({year} yr): {e}")
         return
 
-    # =================================================
-    # 4. SHAP 解释 (仅针对树模型)
-    # =================================================
+    # --- SHAP 绘图 (仅支持树模型) ---
     try:
-        # SHAP 解释器必须用核心模型 (estimator)
         explainer = shap.TreeExplainer(estimator)
         shap_values = explainer.shap_values(input_data)
 
-        # [修复2] 兼容不同的 SHAP 返回格式 (List vs Array)
-        # Random Forest 通常返回 list [class0, class1]，我们需要 class1
+        # 兼容处理：RF 返回 list，XGB/CatBoost 返回 array
         if isinstance(shap_values, list):
-            # 对应的 expected_value 通常也是 list
             base_value = explainer.expected_value[1]
-            shap_values_to_plot = shap_values[1]
+            shap_values_plot = shap_values[1]
         else:
-            # XGBoost/CatBoost 通常直接返回 array
             base_value = explainer.expected_value
-            shap_values_to_plot = shap_values
+            shap_values_plot = shap_values
 
-        # 绘图
         force_plot = shap.force_plot(
             base_value,
-            shap_values_to_plot,
+            shap_values_plot,
             input_data,
-            matplotlib=False,
-            link="logit" # 可选：如果是概率输出，有时需要 logit link，视模型而定
+            matplotlib=False
         )
-
+        
         html_buffer = io.StringIO()
         shap.save_html(html_buffer, force_plot)
         html_content = html_buffer.getvalue()
-
-        # 渲染
-        wrapped = f"""
-        <div style='width: 100%; overflow-x: auto; overflow-y: hidden;'>
-            <style>
-                .shap-force-plot {{ width: 100% !important; }}
-                .js-plotly-plot {{ width: 100% !important; }}
-            </style>
-            {html_content}
-        </div>
-        """
+        
+        wrapped = f"<div style='width:100%; overflow-x:auto;'>{html_content}</div>"
         components.html(wrapped, height=150, scrolling=True)
 
     except Exception:
-        # 如果是 SVM/KNN 等不支持 SHAP 的模型，或者绘图失败
-        # 我们捕获异常但不报错，避免影响概率值的显示
-        st.caption(f"ℹ️ (SHAP plot not available for {type(estimator).__name__})")
+        # 遇到不支持 SHAP 的模型 (如 SVM/KNN) 优雅跳过，不报错
+        st.caption("ℹ️ (Details not available for this model type)")
 
-
-
-
-
-
+with right_col:
+    st.subheader("🤖 Predicted Results")
+    if predict_btn:
+        current_models = models_12 if is_full_mode else models_9
+        
+        # 依次调用
+        render_prediction(current_models[1], input_data, 1)
+        render_prediction(current_models[3], input_data, 3)
+        render_prediction(current_models[5], input_data, 5)
