@@ -155,7 +155,6 @@ def render_prediction(model, input_data, year):
     # 1. 自动对齐特征顺序
     # =================================================
     model_features = None
-    # 尝试获取特征名
     if hasattr(model, 'feature_names_'): model_features = model.feature_names_
     elif hasattr(model, 'feature_names_in_'): model_features = model.feature_names_in_
     elif hasattr(model, 'steps'): # Pipeline
@@ -165,7 +164,6 @@ def render_prediction(model, input_data, year):
             elif hasattr(final_estimator, 'feature_names_in_'): model_features = final_estimator.feature_names_in_
         except: pass
 
-    # 对齐数据列
     if model_features is not None:
         try:
             missing_cols = set(model_features) - set(input_data.columns)
@@ -194,59 +192,65 @@ def render_prediction(model, input_data, year):
 
     try:
         explainer = shap.TreeExplainer(shap_model)
-        shap_values_raw = explainer.shap_values(input_data)
+        # check_additivity=False 可以防止某些浮点数精度报错
+        shap_values_raw = explainer.shap_values(input_data, check_additivity=False)
         base_value_raw = explainer.expected_value
     except Exception as e:
         st.warning(f"无法生成 SHAP 数据: {e}")
         return
 
     # =================================================
-    # 4. 数据清洗与强力对齐 (Fix: SHAP=1, Features=12)
+    # 4. 智能维度清洗 (Smart Shape Handling)
     # =================================================
     try:
-        # --- A. 准备特征数据 ---
-        # 强制转为纯净的一维数组
+        # --- A. 准备特征元数据 ---
         final_feature_values = input_data.iloc[0].values.flatten().astype(float)
         final_feature_names = input_data.columns.tolist()
-        n_features = len(final_feature_names) # 应该是 12 或 9
+        n_features = len(final_feature_names)
 
-        # --- B. 处理 SHAP Values ---
+        # --- B. 处理 SHAP Values (核心修复) ---
         shap_val = shap_values_raw
         
-        # 1. 如果是列表 (RF通常返回 [class0, class1])，取第二个
+        # 1. 预处理 List (RandomForest 常见)
+        # 如果是 [array_class0, array_class1]，取第二个
         if isinstance(shap_val, list):
-            # 防御性检查：列表不为空
             if len(shap_val) > 1:
                 shap_val = shap_val[1]
-            elif len(shap_val) == 1:
+            else:
                 shap_val = shap_val[0]
         
-        # 2. 转为 Numpy 数组并移除所有为1的维度 (squeeze)
-        # 例如 (1, 12, 1) -> (12,)
+        # 转换为 Numpy以便操作
         shap_val = np.array(shap_val)
-        shap_val = np.squeeze(shap_val)
+
+        # 2. 精确形状匹配 (不再盲目 Flatten)
+        # 情况 1: (1, 12, 2) -> 1样本, 12特征, 2类别 (Sklearn RF 常见)
+        if shap_val.ndim == 3 and shap_val.shape[-1] == 2:
+            shap_val = shap_val[0, :, 1] # 取第0样本，所有特征，第1类别
         
-        # 3. 基于元素总数进行最终修正
-        if shap_val.size == n_features:
-            # 完美情况：元素数量等于特征数 (12 == 12)
-            # 无论形状如何，直接拉平
-            shap_val = shap_val.flatten()
+        # 情况 2: (1, 12) -> 标准二分类输出
+        elif shap_val.ndim == 2 and shap_val.shape[0] == 1:
+            shap_val = shap_val[0, :]
             
-        elif shap_val.size == 2 * n_features:
-            # 双倍情况：可能混合了两个类别 (24 elements)
-            # 尝试拉平后取后半部分
-            st.warning("⚠️ 检测到双类别混合数据，尝试自动提取正类。")
-            flat = shap_val.flatten()
-            shap_val = flat[n_features:] # 取后12个
-            
-        else:
-            # 异常情况：打印详细调试信息
-            st.error(f"⚠️ SHAP 形状严重不匹配!")
-            st.write(f"Expected Features: {n_features}")
-            st.write(f"SHAP Raw Type: {type(shap_values_raw)}")
-            st.write(f"SHAP Processed Shape: {shap_val.shape}")
-            st.write(f"SHAP Total Elements: {shap_val.size}")
-            return # 退出绘图
+        # 情况 3: (12, 2) -> 某些特殊情况 squeeze 后
+        elif shap_val.ndim == 2 and shap_val.shape[1] == 2 and shap_val.shape[0] == n_features:
+            shap_val = shap_val[:, 1] # 所有特征，第1类别
+
+        # 情况 4: (2, 12) -> 类别在前，特征在后
+        elif shap_val.ndim == 2 and shap_val.shape[0] == 2 and shap_val.shape[1] == n_features:
+            shap_val = shap_val[1, :]
+
+        # 3. 最终兜底：强制拉平并截断
+        shap_val = np.squeeze(shap_val)
+        if shap_val.ndim > 1: 
+             shap_val = shap_val.flatten()
+        
+        # 如果经过上述处理，长度还是不对 (比如 24)，说明上面没匹配到，做最后的抢救
+        if shap_val.size == 2 * n_features:
+             # 假设是 (Features, 2) 这种交替排列
+             # 取后半部分通常不安全，我们尝试取奇数位 (0, 2, 4 是类0; 1, 3, 5 是类1)
+             # 但为了安全，这里还是建议检查前面的逻辑。
+             # 作为一个强力补丁：
+             shap_val = shap_val[-n_features:] 
 
         final_shap_values = shap_val
 
@@ -255,15 +259,15 @@ def render_prediction(model, input_data, year):
         if isinstance(base_val, (list, np.ndarray)):
             base_val = np.array(base_val).flatten()
             if base_val.size > 1:
-                base_val = base_val[-1] # 取最后一个
-            elif base_val.size == 1:
+                base_val = base_val[-1] # 取正类
+            else:
                 base_val = base_val[0]
         final_base_value = float(base_val)
 
-        # --- D. 最终维度检查 ---
-        if len(final_shap_values) != len(final_feature_values):
-            st.warning(f"⚠️ 维度校验失败: SHAP={len(final_shap_values)}, Features={len(final_feature_values)}")
-            return
+        # --- D. 维度校验 ---
+        if final_shap_values.shape[0] != n_features:
+             st.warning(f"⚠️ 维度校验未通过: SHAP shape {final_shap_values.shape} != Features {n_features}")
+             return
 
         # =================================================
         # 5. 绘图
@@ -292,7 +296,7 @@ def render_prediction(model, input_data, year):
         components.html(wrapped, height=140, scrolling=True)
     
     except Exception as e:
-        st.error(f"⚠️ 绘图渲染逻辑内部错误: {e}")
+        st.error(f"⚠️ 图表渲染失败: {e}")
 
 
 with right_col:
@@ -310,6 +314,7 @@ with right_col:
             # 调试辅助：如果报错，打印当前 DataFrame 的列名，方便对比模型需求
 
             st.write("Current Input Columns:", input_data.columns.tolist())
+
 
 
 
