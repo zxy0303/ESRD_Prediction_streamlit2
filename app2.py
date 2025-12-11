@@ -149,22 +149,31 @@ input_data = pd.DataFrame(data_dict)
 # ==========================================
 # 5. 预测与渲染逻辑 (Prediction Logic)
 # ==========================================
+这个错误提示 "The truth value of an array with more than one element is ambiguous" 通常是因为 shap.force_plot 接收到的 base_value（基准值/期望值）是一个包含多个元素的数组（例如 [0.1, 0.9]），而它期望的是一个单一的数值（标量）。
+
+这种情况在使用 shap.TreeExplainer 处理部分二分类模型时经常发生，因为 explainer.expected_value 返回的形状可能多种多样（列表、一维数组、甚至嵌套数组）。
+
+请使用下面的 增强版 render_prediction 函数。这个版本增加了对 base_value 和 shap_values 格式的深度清洗，确保传给绘图函数的是标准格式。
+
+修复方案：替换 app2.py 中的 render_prediction 函数
+Python
+
+# ==========================================
+# 5. 预测与渲染逻辑 (Prediction Logic) - 增强修复版
+# ==========================================
 def render_prediction(model, input_data, year):
     # =================================================
-    # 修复 1: 自动对齐特征顺序 (兼容 sklearn 和 pipeline)
+    # 1. 自动对齐特征顺序 (兼容 sklearn 和 pipeline)
     # =================================================
     model_features = None
     
-    # 1. 尝试直接获取 (针对 CatBoost/XGBoost)
+    # 尝试获取特征名称
     if hasattr(model, 'feature_names_'):
         model_features = model.feature_names_
-    # 2. 尝试获取 sklearn 标准属性 (针对 RandomForest)
     elif hasattr(model, 'feature_names_in_'):
         model_features = model.feature_names_in_
-    # 3. 如果是 Pipeline，尝试从最后一步模型获取
-    elif hasattr(model, 'steps'):
+    elif hasattr(model, 'steps'): # Pipeline
         try:
-            # steps 通常是列表 [('step_name', step_obj), ...]，取最后一个对象的属性
             final_estimator = model.steps[-1][1]
             if hasattr(final_estimator, 'feature_names_'):
                 model_features = final_estimator.feature_names_
@@ -175,68 +184,80 @@ def render_prediction(model, input_data, year):
 
     if model_features is not None:
         try:
-            # 补齐缺失列 (设为0)
+            # 补齐缺失列
             missing_cols = set(model_features) - set(input_data.columns)
             if missing_cols:
                 for c in missing_cols:
                     input_data[c] = 0
-            
-            # 核心修复: 强制按照模型记录的特征顺序重排 input_data
+            # 强制重排
             input_data = input_data[model_features]
         except KeyError as e:
-            st.error(f"❌ 数据对齐失败，缺少特征: {e}")
+            st.error(f"❌ 数据对齐失败: {e}")
             return
-    else:
-        st.warning("⚠️ 无法读取模型特征顺序，将使用默认输入顺序。如果报错，请检查输入特征名称是否与训练时一致。")
 
     # =================================================
     # 2. 预测与生成 SHAP 值
     # =================================================
-    # 预测使用原始 model (如果是 Pipeline，需要它来处理可能的前置步骤)
     try:
         esrd = model.predict_proba(input_data)[0][1]
     except Exception as e:
         st.error(f"预测发生错误: {e}")
         return
 
-    # 修复 2: 针对 Pipeline 提取内部模型给 SHAP
+    # 提取 Pipeline 内部模型 (修复 9 特征报错)
     shap_model = model
     if hasattr(model, 'steps'):
-        # 提取 Pipeline 的最后一步（通常是分类器）
         shap_model = model.steps[-1][1]
 
     try:
-        # 创建 Explainer
         explainer = shap.TreeExplainer(shap_model)
-        # 计算 SHAP 值
         shap_values = explainer.shap_values(input_data)
     except Exception as e:
-        st.warning(f"无法生成 SHAP 图 (可能是模型类型不兼容): {e}")
+        st.warning(f"无法生成 SHAP 图: {e}")
         st.write(f"Probability of kidney failure within {year} year: **{esrd:.2%}**")
         return
 
     st.write(f"Probability of kidney failure within {year} year: **{esrd:.2%}**")
 
     # =================================================
-    # 3. 绘图与显示优化
+    # 3. 数据格式清洗 (关键修复：解决 ambiguous array 报错)
     # =================================================
     try:
-        # 针对二分类模型，shap_values 可能是 list (对应类0和类1)，通常取 shap_values[1] 或 shap_values
-        # TreeExplainer 对不同模型返回格式不同，这里做一个简单的兼容性处理
+        # --- A. 清洗 shap_values ---
         shap_val_to_plot = shap_values
-        if isinstance(shap_values, list) and len(shap_values) == 2:
-             # 如果是 list，通常 index 1 是正类 (Yes)
-            shap_val_to_plot = shap_values[1]
         
-        # 某些版本的 shap + sklearn RF，expected_value 也是 list
+        # 如果是列表 (通常是二分类 [class0, class1])，取 class1
+        if isinstance(shap_values, list):
+            if len(shap_values) >= 2:
+                shap_val_to_plot = shap_values[1]
+            else:
+                shap_val_to_plot = shap_values[0]
+        
+        # --- B. 清洗 base_value (expected_value) ---
         base_value = explainer.expected_value
-        if isinstance(base_value, list) or isinstance(base_value, np.ndarray):
-            if len(base_value) == 2:
+        
+        # 统一转为 numpy array 以便处理
+        if not isinstance(base_value, np.ndarray):
+            base_value = np.array(base_value)
+            
+        # 如果是多维数组或列表，尝试提取目标类别的标量
+        # 常见情况: array([0.1, 0.9]) -> 取 0.9
+        if base_value.size > 1:
+            if base_value.ndim >= 1 and len(base_value) >= 2:
+                 # 假设二分类，取第二个值
                 base_value = base_value[1]
+            else:
+                # 异常情况：如果是 (1, 2) 这种形状，先 flatten
+                base_value = base_value.flatten()[-1] # 取最后一个
+        
+        # 最终确保是标量 (float)
+        if hasattr(base_value, 'item'):
+            base_value = base_value.item()
 
+        # --- C. 绘图 ---
         force_plot = shap.force_plot(
             base_value,
-            shap_val_to_plot, # 使用处理后的 SHAP 值
+            shap_val_to_plot,
             input_data,
             matplotlib=False
         )
@@ -258,7 +279,8 @@ def render_prediction(model, input_data, year):
         components.html(wrapped, height=component_height, scrolling=True)
     
     except Exception as e:
-        st.error(f"SHAP 图表渲染出错: {e}")
+        # 仅显示预测结果，不让图表报错卡死整个应用
+        st.warning(f"⚠️ SHAP 图表渲染跳过 (数据格式不兼容): {e}")
 
 
 with right_col:
@@ -276,4 +298,5 @@ with right_col:
             # 调试辅助：如果报错，打印当前 DataFrame 的列名，方便对比模型需求
 
             st.write("Current Input Columns:", input_data.columns.tolist())
+
 
