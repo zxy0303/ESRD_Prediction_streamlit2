@@ -150,88 +150,92 @@ input_data = pd.DataFrame(data_dict)
 # ==========================================
 def render_prediction(model, input_data, year):
     # =================================================
-    # 1. 自动对齐特征顺序 (防止报错)
+    # 1. 提取核心模型 (Handle Pipeline)
+    # =================================================
+    # 如果模型是 Pipeline (包含 steps 属性)，我们需要取出最后一步的分类器
+    # 因为 SHAP TreeExplainer 无法直接解释 Pipeline
+    if hasattr(model, 'steps'):
+        # 取出 pipeline 的最后一步，格式通常是 [('step_name', step_object), ...]
+        estimator = model.steps[-1][1]
+    else:
+        estimator = model
+
+    # =================================================
+    # 2. 自动对齐特征顺序 (Feature Alignment)
     # =================================================
     try:
-        model_features = model.feature_names_
-        missing_cols = set(model_features) - set(input_data.columns)
-        if missing_cols:
-            for c in missing_cols:
-                input_data[c] = 0
-        input_data = input_data[model_features]
+        # 优先从核心模型(estimator)中获取特征名称
+        # CatBoost/XGBoost 使用 feature_names_, Sklearn 使用 feature_names_in_
+        if hasattr(estimator, 'feature_names_'): 
+            model_features = estimator.feature_names_
+        elif hasattr(estimator, 'feature_names_in_'): 
+            model_features = estimator.feature_names_in_
+        else:
+            # 如果找不到特征名属性，暂时跳过对齐（可能会在预测时报错）
+            model_features = None
+
+        if model_features is not None:
+            # 补齐输入数据中缺失的列（如果有的话），填 0
+            missing_cols = set(model_features) - set(input_data.columns)
+            if missing_cols:
+                for c in missing_cols:
+                    input_data[c] = 0
+            
+            # 关键：强制按照模型训练时的特征顺序重排输入数据
+            input_data = input_data[model_features]
+
     except AttributeError:
-        st.warning("⚠️ 无法读取模型特征顺序，请确保输入数据的列顺序正确。")
+        st.warning("⚠️ 无法读取模型特征顺序，正在尝试使用默认顺序。")
     except KeyError as e:
         st.error(f"❌ 数据对齐失败，缺少特征: {e}")
         return
 
     # =================================================
-    # 2. 预测与生成 SHAP 值
+    # 3. 预测与 SHAP 解释
     # =================================================
-    esrd = model.predict_proba(input_data)[0][1]
-    explainer = shap.TreeExplainer(model)
-    shap_values = explainer.shap_values(input_data)
+    try:
+        # 1. 预测概率：必须使用完整的 model (Pipeline)，以保证预处理步骤（如存在）被执行
+        esrd = model.predict_proba(input_data)[0][1]
+        
+        st.write(f"Probability of kidney failure within {year} year: **{esrd:.2%}**")
 
-    st.write(f"Probability of kidney failure within {year} year: **{esrd:.2%}**")
+        # 2. SHAP 解释：必须使用核心模型 (estimator)，因为 TreeExplainer 只认树模型
+        explainer = shap.TreeExplainer(estimator)
+        
+        # 计算 SHAP 值
+        shap_values = explainer.shap_values(input_data)
 
-    # =================================================
-    # 3. 绘图与显示优化 (关键修改部分)
-    # =================================================
-    # 生成 SHAP JS 图
-    force_plot = shap.force_plot(
-        explainer.expected_value,
-        shap_values[0],
-        input_data,
-        matplotlib=False,
-        # 尝试让 SHAP 自身不强制超大宽度，但在 HTML 中我们主要靠 CSS 控制
-    )
+        # 3. 绘图
+        force_plot = shap.force_plot(
+            explainer.expected_value,
+            shap_values[0] if isinstance(shap_values, list) else shap_values, # 兼容不同版本返回值
+            input_data,
+            matplotlib=False,
+        )
 
-    # 保存为 HTML
-    html_buffer = io.StringIO()
-    shap.save_html(html_buffer, force_plot)
-    html_content = html_buffer.getvalue()
+        html_buffer = io.StringIO()
+        shap.save_html(html_buffer, force_plot)
+        html_content = html_buffer.getvalue()
 
-    # -------------------------------------------------------
-    # 调整 1: 增加高度 (Height)
-    # 原来的 140 太小，容易切掉下方的特征名，改为 300 或更高
-    # -------------------------------------------------------
-    component_height = 140
+        component_height = 140
+        wrapped = f"""
+        <div style='width: 100%; overflow-x: auto; overflow-y: hidden;'>
+            <style>
+                .shap-force-plot {{ width: 100% !important; }}
+                .js-plotly-plot {{ width: 100% !important; }}
+            </style>
+            {html_content}
+        </div>
+        """
+        components.html(wrapped, height=component_height, scrolling=True)
 
-    # -------------------------------------------------------
-    # 调整 2: CSS 样式优化
-    # - width: 100% !important; 强制图表适应容器宽度
-    # - overflow-x: auto; 如果实在太挤，允许横向滚动
-    # -------------------------------------------------------
-    wrapped = f"""
-    <div style='width: 100%; overflow-x: auto; overflow-y: hidden;'>
-        <style>
-            /* 尝试强制覆盖 SHAP 内部生成的宽度样式 */
-            .shap-force-plot {{ width: 100% !important; }}
-            .js-plotly-plot {{ width: 100% !important; }}
-        </style>
-        {html_content}
-    </div>
-    """
+    except Exception as e:
+        st.error(f"Error in processing: {e}")
+        # 调试信息：如果报错，显示当前处理的模型类型和列名，方便排查
+        st.write(f"Debug Info - Model Type: {type(model)}")
+        st.write(f"Debug Info - Estimator Type: {type(estimator)}")
+        st.write("Debug Info - Input Columns:", input_data.columns.tolist())
 
-    # 渲染组件：开启 scrolling=True 作为双重保险
-    components.html(wrapped, height=component_height, scrolling=True)
-
-
-with right_col:
-    st.subheader("🤖 Predicted Results")
-    if predict_btn:
-        try:
-            current_models = models_12 if is_full_mode else models_9
-
-            render_prediction(current_models[1], input_data, 1)
-            render_prediction(current_models[3], input_data, 3)
-            render_prediction(current_models[5], input_data, 5)
-
-        except Exception as e:
-            st.error(f"Error: {e}")
-            # 调试辅助：如果报错，打印当前 DataFrame 的列名，方便对比模型需求
-
-            st.write("Current Input Columns:", input_data.columns.tolist())
 
 
 
