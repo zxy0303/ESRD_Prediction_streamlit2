@@ -149,18 +149,7 @@ input_data = pd.DataFrame(data_dict)
 # ==========================================
 # 5. 预测与渲染逻辑 (Prediction Logic)
 # ==========================================
-这个错误提示 "The truth value of an array with more than one element is ambiguous" 通常是因为 shap.force_plot 接收到的 base_value（基准值/期望值）是一个包含多个元素的数组（例如 [0.1, 0.9]），而它期望的是一个单一的数值（标量）。
 
-这种情况在使用 shap.TreeExplainer 处理部分二分类模型时经常发生，因为 explainer.expected_value 返回的形状可能多种多样（列表、一维数组、甚至嵌套数组）。
-
-请使用下面的 增强版 render_prediction 函数。这个版本增加了对 base_value 和 shap_values 格式的深度清洗，确保传给绘图函数的是标准格式。
-
-修复方案：替换 app2.py 中的 render_prediction 函数
-Python
-
-# ==========================================
-# 5. 预测与渲染逻辑 (Prediction Logic) - 增强修复版
-# ==========================================
 def render_prediction(model, input_data, year):
     # =================================================
     # 1. 自动对齐特征顺序 (兼容 sklearn 和 pipeline)
@@ -298,5 +287,6 @@ with right_col:
             # 调试辅助：如果报错，打印当前 DataFrame 的列名，方便对比模型需求
 
             st.write("Current Input Columns:", input_data.columns.tolist())
+
 
 
