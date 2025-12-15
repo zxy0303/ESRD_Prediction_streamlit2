@@ -17,9 +17,9 @@ st.title("🩺 Clinical Decision Support System")
 def load_models():
     # 加载 12 特征模型
     models_12 = {
-        1: joblib.load('./selected_features/rf_1yr.pkl'),
-        3: joblib.load('./selected_features/rf_3yr.pkl'),
-        5: joblib.load('./selected_features/rf_5yr.pkl')
+        1: joblib.load('./selected_features/catboost_1yr.pkl'),
+        3: joblib.load('./selected_features/catboost_3yr.pkl'),
+        5: joblib.load('./selected_features/catboost_5yr.pkl')
     }
 
     # 加载 9 特征模型 (请确保你有这些文件，且文件名正确)
@@ -314,6 +314,7 @@ with right_col:
             # 调试辅助：如果报错，打印当前 DataFrame 的列名，方便对比模型需求
 
             st.write("Current Input Columns:", input_data.columns.tolist())
+
 
 
 
