@@ -177,6 +177,14 @@ def render_prediction(model, input_data, year):
     # =================================================
     # 2. 预测概率
     # =================================================
+    st.write("Current Input Columns:", input_data.columns.tolist())
+    try:
+        st.write("Model Expects:", model.feature_names_)
+    except:
+        try:
+            st.write("Model Expects (in_):", model.feature_names_in_)
+        except:
+            st.write("Model feature names not found")
     try:
         esrd = model.predict_proba(input_data)[0][1]
         st.write(f"Probability of kidney failure within {year} year: **{esrd:.2%}**")
@@ -314,6 +322,7 @@ with right_col:
             # 调试辅助：如果报错，打印当前 DataFrame 的列名，方便对比模型需求
 
             st.write("Current Input Columns:", input_data.columns.tolist())
+
 
 
 
