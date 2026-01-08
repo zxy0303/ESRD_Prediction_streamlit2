@@ -45,11 +45,11 @@ models_12, models_9 = load_models()
 st.markdown("### ⚙️ Settings")
 model_mode = st.radio(
     "Select Feature Input Mode:",
-    ("12 Features (Full)", "9 Features (Reduced)"),
+    ("12 Features (Enriched model)", "9 Features (Simplified model)"),
     horizontal=True
 )
 
-is_full_mode = (model_mode == "12 Features (Full)")
+is_full_mode = (model_mode == "12 Features (Enriched model)")
 
 st.markdown(
     f"Current Mode: **{model_mode}**. "
@@ -314,6 +314,7 @@ with right_col:
             # 调试辅助：如果报错，打印当前 DataFrame 的列名，方便对比模型需求
 
             st.write("Current Input Columns:", input_data.columns.tolist())
+
 
 
 
