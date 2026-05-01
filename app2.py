@@ -49,7 +49,7 @@ model_mode = st.radio(
     horizontal=True
 )
 
-is_full_mode = (model_mode == "12 Features (Enriched model)")
+is_full_mode = (model_mode == "12 Features (Specialized model)")
 
 st.markdown(
     f"Current Mode: **{model_mode}**. "
