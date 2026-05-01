@@ -45,7 +45,7 @@ models_12, models_9 = load_models()
 st.markdown("### ⚙️ Settings")
 model_mode = st.radio(
     "Select Feature Input Mode:",
-    ("12 Features (Enriched model)", "9 Features (Simplified model)"),
+    ("12 Features (Specialized model)", "9 Features (General model)"),
     horizontal=True
 )
 
