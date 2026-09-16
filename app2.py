@@ -6,7 +6,9 @@ import matplotlib.pyplot as plt
 import streamlit.components.v1 as components
 import io
 import numpy as np
+from usage_tracking import record_visit, record_predict_click
 st.set_page_config(page_title="Clinical Decision Support System", layout="wide")
+record_visit()  # 后台统计：每个新 Streamlit 会话记录一次访问
 st.title("🩺 Clinical Decision Support System")
 
 
@@ -112,7 +114,7 @@ with left_col:
         preterm_birth = st.selectbox("Preterm Birth", ["No", "Yes"])
         behavioral_cognitive_abnormalities = st.selectbox("Behavioral Cognitive Abnormalities", ["No", "Yes"])
 
-    predict_btn = st.button("PREDICT")
+    predict_btn = st.button("PREDICT", on_click=record_predict_click)
 
 
 # ==========================================
