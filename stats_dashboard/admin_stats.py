@@ -112,4 +112,4 @@ updated_at = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")).st
     "%Y-%m-%d %H:%M:%S %Z"
 )
 st.caption(f"页面读取时间：{updated_at}")
-st.info("本页面仅展示累计使用次数，不包含患者输入、预测结果或身份信息。")
+st.info("本页面仅展示累计访问次数，以及点击预测次数。")
